@@ -289,12 +289,22 @@ class QwenModelWrapper(torch.nn.Module):
         """
         with torch.no_grad():
             with self.stats.time_infer():
-                # Get device from model
-                device = next(self.module.parameters()).device
-                dtype = next(self.module.parameters()).dtype
+                # Get device from model (use first non-meta device)
+                device = None
+                for param in self.module.parameters():
+                    if param.device.type != 'meta':
+                        device = param.device
+                        break
+                if device is None:
+                    device = torch.device("cuda:0")
 
-                # Move inputs to model device
-                inputs = inputs.to(device=device, dtype=dtype)
+                # IMPORTANT: Keep inputs in float16/bfloat16 for FP8 models
+                # FP8 models internally handle mixed precision - inputs should NOT be FP8
+                # The model will use FP8 for weights but higher precision for activations
+                inputs = inputs.to(device=device, dtype=torch.bfloat16)
+
+                logger.info(f"[DEBUG] Input shape: {inputs.shape}, dtype: {inputs.dtype}, device: {inputs.device}")
+                logger.info(f"[DEBUG] Input stats: min={inputs.min().item():.4f}, max={inputs.max().item():.4f}, has_nan={torch.isnan(inputs).any().item()}")
 
                 # Qwen expects inputs_embeds for direct embedding input
                 outputs = self.module(inputs_embeds=inputs, return_dict=True)
@@ -302,8 +312,13 @@ class QwenModelWrapper(torch.nn.Module):
                 # Get logits from last token position
                 logits = outputs.logits[:, -1, :]  # (batch, vocab_size)
 
+                logger.info(f"[DEBUG] Logits shape: {logits.shape}, dtype: {logits.dtype}")
+                logger.info(f"[DEBUG] Logits stats: min={logits.min().item():.4f}, max={logits.max().item():.4f}, has_nan={torch.isnan(logits).any().item()}")
+
                 # Normalize logits (L2 norm)
                 logits_norm = torch.nn.functional.normalize(logits, p=2, dim=-1)
+
+                logger.info(f"[DEBUG] Normalized logits: has_nan={torch.isnan(logits_norm).any().item()}")
 
                 # Return first k_dim dimensions
                 return logits_norm[:, :self.k_dim]
@@ -346,11 +361,25 @@ class QwenModelWrapper(torch.nn.Module):
         )
 
         load_time = time.time() - start_time
+
+        # Log full model config for debugging
         logger.info(
             f"Qwen model loaded in {load_time:.2f}s | "
             f"hidden_size={model.config.hidden_size}, "
-            f"vocab_size={model.config.vocab_size}"
+            f"vocab_size={model.config.vocab_size}, "
+            f"num_hidden_layers={model.config.num_hidden_layers}, "
+            f"num_attention_heads={model.config.num_attention_heads}"
         )
+
+        # For MoE models, also log MoE-specific info
+        if hasattr(model.config, 'num_experts'):
+            logger.info(f"MoE config: num_experts={model.config.num_experts}")
+        if hasattr(model.config, 'num_experts_per_tok'):
+            logger.info(f"MoE config: num_experts_per_tok={model.config.num_experts_per_tok}")
+
+        # Log actual parameter dtype
+        first_param = next(model.parameters())
+        logger.info(f"Model parameter dtype: {first_param.dtype}, device: {first_param.device}")
 
         return {
             "model": model,
