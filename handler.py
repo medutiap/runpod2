@@ -765,6 +765,190 @@ def pooled_handler(event: Dict[str, Any]):
             pass
 
 
+def single_handler_v2(event: Dict[str, Any]):
+    """
+    PoC v2 single mode handler - uses Qwen model with pretrained weights.
+
+    Single job mode for testing without orchestrator.
+    Loads Qwen model, runs computation, returns artifacts.
+
+    Input (ALL REQUIRED except max_batches):
+    {
+        "mode": "single_v2",
+        "block_hash": str,        # 64 char hex string
+        "block_height": int,
+        "public_key": str,        # e.g., "cosmos1..."
+        "batch_size": int,        # e.g., 32
+        "start_nonce": int,       # e.g., 0
+        "max_batches": int,       # optional, default 100
+    }
+
+    Returns:
+    {
+        "artifacts": [{"nonce": int, "vector_b64": str}, ...],
+        "encoding": {"dtype": "f16", "k_dim": 12, "endian": "le"},
+        "stats": {...}
+    }
+    """
+    global _cuda_broken
+
+    if _cuda_broken:
+        logger.error("CUDA already marked as broken - killing worker immediately")
+        yield {"error": "Worker CUDA is broken", "error_type": "NotEnoughGPUResources", "fatal": True}
+        os._exit(1)
+
+    try:
+        import torch
+        from pow.compute.compute import ComputeV2
+        from pow.data import ArtifactBatch
+
+        input_data = event.get("input", {})
+
+        # Get ALL parameters from client
+        block_hash = input_data["block_hash"]
+        block_height = input_data["block_height"]
+        public_key = input_data["public_key"]
+        batch_size = input_data.get("batch_size", 32)
+        start_nonce = input_data.get("start_nonce", 0)
+        max_batches = input_data.get("max_batches", 100)
+
+        logger.info(f"SINGLE V2 MODE: block_hash={block_hash[:16]}..., public_key={public_key[:16]}...")
+        logger.info(f"  batch_size={batch_size}, start_nonce={start_nonce}, max_batches={max_batches}")
+
+        # Step 1: Detect GPUs
+        gpu_count = torch.cuda.device_count()
+        logger.info(f"Detected {gpu_count} GPUs")
+
+        if gpu_count == 0:
+            yield {"error": "No GPUs detected", "error_type": "NotEnoughGPUResources", "fatal": True}
+            return
+
+        yield {"status": "loading_model", "poc_version": "v2", "gpu_count": gpu_count}
+
+        # Step 2: Load Qwen model from HuggingFace
+        logger.info("Loading Qwen model from HuggingFace...")
+        model_start = time.time()
+
+        from pow.models.qwen_loader import MODEL_NAME, K_DIM
+
+        base_model_data = QwenModelWrapper.build_base_model_qwen(
+            model_name=MODEL_NAME,
+            k_dim=K_DIM,
+        )
+
+        model_load_time = time.time() - model_start
+        logger.info(f"Qwen model loaded in {model_load_time:.1f}s")
+
+        yield {
+            "status": "model_loaded",
+            "load_time": int(model_load_time),
+            "model_name": MODEL_NAME,
+            "k_dim": K_DIM,
+            "hidden_size": base_model_data["hidden_size"],
+            "vocab_size": base_model_data["vocab_size"],
+        }
+
+        # Step 3: Initialize ComputeV2
+        seq_len = input_data.get("seq_len", 16)
+
+        compute = ComputeV2(
+            block_hash=block_hash,
+            block_height=block_height,
+            public_key=public_key,
+            node_id=0,
+            base_model_data=base_model_data,
+            seq_len=seq_len,
+        )
+
+        yield {"status": "computing", "poc_version": "v2"}
+
+        # Step 4: Run computation loop
+        start_time = time.time()
+        batch_count = 0
+        total_artifacts = 0
+        all_artifacts = []
+        encoding_info = None
+        current_nonce = start_nonce
+
+        while batch_count < max_batches:
+            elapsed = time.time() - start_time
+
+            # Check timeout (7 minutes)
+            if elapsed > MAX_JOB_DURATION:
+                logger.info(f"TIMEOUT: {elapsed:.0f}s exceeded {MAX_JOB_DURATION}s limit")
+                break
+
+            # Generate nonce batch
+            nonces = list(range(current_nonce, current_nonce + batch_size))
+            current_nonce += batch_size
+
+            # Process batch through Qwen model
+            future = compute(
+                nonces=nonces,
+                public_key=public_key,
+                next_nonces=None,
+            )
+
+            # Wait for result
+            artifact_batch: ArtifactBatch = future.result()
+
+            batch_count += 1
+            batch_artifacts = [a.to_dict() for a in artifact_batch.artifacts]
+            all_artifacts.extend(batch_artifacts)
+            total_artifacts += len(batch_artifacts)
+
+            if encoding_info is None:
+                encoding_info = artifact_batch.encoding.to_dict()
+
+            # Yield progress
+            yield {
+                "status": "batch_complete",
+                "batch_number": batch_count,
+                "batch_size": len(batch_artifacts),
+                "total_artifacts": total_artifacts,
+                "elapsed_seconds": int(elapsed),
+            }
+
+            if batch_count % 10 == 0:
+                logger.info(f"Batch #{batch_count}: {len(batch_artifacts)} artifacts, total={total_artifacts}")
+
+        # Step 5: Final result
+        elapsed = time.time() - start_time
+        logger.info(f"COMPLETED: {batch_count} batches, {total_artifacts} artifacts in {elapsed:.1f}s")
+
+        compute.shutdown()
+
+        yield {
+            "status": "completed",
+            "artifacts": all_artifacts,
+            "encoding": encoding_info or {"dtype": "f16", "k_dim": K_DIM, "endian": "le"},
+            "stats": {
+                "total_batches": batch_count,
+                "total_artifacts": total_artifacts,
+                "elapsed_seconds": int(elapsed),
+                "artifacts_per_second": total_artifacts / elapsed if elapsed > 0 else 0,
+            },
+        }
+
+        # Free GPU memory
+        del base_model_data
+        torch.cuda.empty_cache()
+
+    except NotEnoughGPUResources as e:
+        _cuda_broken = True
+        logger.error(f"GPU INIT FAILED: {str(e)}")
+        yield {"error": str(e), "error_type": "NotEnoughGPUResources", "fatal": True}
+        os._exit(1)
+
+    except KeyError as e:
+        logger.error(f"Missing required parameter: {e}")
+        yield {"error": f"Missing required parameter: {e}", "error_type": "KeyError"}
+
+    except Exception as e:
+        logger.error(f"SINGLE V2 ERROR: {str(e)}", exc_info=True)
+        yield {"error": str(e), "error_type": type(e).__name__}
+
+
 def pooled_handler_v2(event: Dict[str, Any]):
     """
     PoC v2 pooled mode handler - uses Qwen model with pretrained weights.
@@ -1049,6 +1233,17 @@ def handler(event: Dict[str, Any]):
     """
     Main handler - dispatches to pooled, warmup, or generation mode.
 
+    Single V2 mode input (PoC v2 with Qwen, for testing):
+    {
+        "mode": "single_v2",
+        "block_hash": str,
+        "block_height": int,
+        "public_key": str,
+        "batch_size": int,        # optional, default 32
+        "start_nonce": int,       # optional, default 0
+        "max_batches": int,       # optional, default 100
+    }
+
     Pooled V2 mode input (PoC v2 with Qwen, recommended):
     {
         "mode": "pooled_v2",
@@ -1076,6 +1271,11 @@ def handler(event: Dict[str, Any]):
     """
     input_data = event.get("input", {})
     mode = input_data.get("mode", "")
+
+    # Check for single v2 mode (PoC v2 with Qwen, for testing)
+    if mode == "single_v2":
+        yield from single_handler_v2(event)
+        return
 
     # Check for pooled v2 mode (PoC v2 with Qwen)
     if mode == "pooled_v2":
