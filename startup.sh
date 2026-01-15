@@ -36,8 +36,8 @@ echo "Host: ${VLLM_HOST}"
     --tensor-parallel-size "${TP_SIZE}" \
     --enable-poc \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
-    --max-model-len 16384 \
+    --gpu-memory-utilization 0.85 \
+    --max-model-len 8192 \
     --enforce-eager \
     2>&1 | tee /tmp/vllm.log &
 
