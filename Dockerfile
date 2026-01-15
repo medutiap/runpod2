@@ -26,6 +26,8 @@ ENV SEQ_LEN=8000
 # vLLM settings
 ENV VLLM_PORT=8000
 ENV VLLM_HOST=127.0.0.1
+# Increase PoC request timeout (default 10000ms = 10s)
+ENV VLLM_RPC_TIMEOUT=120000
 
 # Tensor parallel size - MUST be 4 for Qwen3-235B FP8
 # With TP=8, the MoE gate/up weights (192) are not divisible by FP8 block_n (128)
