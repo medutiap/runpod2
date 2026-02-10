@@ -40,6 +40,7 @@ echo "Host: ${VLLM_HOST}"
     --max-model-len 1025 \
     --enforce-eager \
     --load-format runai_streamer \
+    --model-loader-extra-config '{"concurrency":16}' \
     2>&1 | tee /tmp/vllm.log &
 
 VLLM_PID=$!
