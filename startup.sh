@@ -15,8 +15,8 @@ if [ "$GPU_COUNT" -eq "0" ]; then
     exit 1
 fi
 
-# Calculate tensor parallel size (use all GPUs)
-TP_SIZE=${TENSOR_PARALLEL_SIZE:-$GPU_COUNT}
+# Use actual GPU count (auto-detect)
+TP_SIZE=${GPU_COUNT}
 echo "Tensor Parallel Size: ${TP_SIZE}"
 
 # vLLM server settings

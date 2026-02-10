@@ -29,9 +29,9 @@ ENV VLLM_HOST=127.0.0.1
 # Increase PoC request timeout (default 10000ms = 10s)
 ENV VLLM_RPC_TIMEOUT=120000
 
-# Tensor parallel size - MUST be 4 for Qwen3-235B FP8
-# With TP=8, the MoE gate/up weights (192) are not divisible by FP8 block_n (128)
-ENV TENSOR_PARALLEL_SIZE=4
+# Tensor parallel size — auto-detected from GPU count in startup.sh
+# Note: TP=8 causes issues with Qwen3-235B FP8 (MoE gate/up weights not divisible by FP8 block_n)
+# TP=2 and TP=4 work fine
 
 # NCCL settings for multi-GPU communication
 # Disable NVLS (NVLink SHARP) - causes "invalid argument" errors in containers
