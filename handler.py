@@ -724,17 +724,12 @@ def handler(job: Dict) -> Generator[Dict, None, None]:
 # Entry Point
 # =============================================================================
 
-if __name__ == "__main__":
-    logger.info("=" * 60)
-    logger.info("RunPod2 vLLM Handler Starting")
-    logger.info("=" * 60)
-    logger.info(f"vLLM URL: {VLLM_BASE_URL}")
-    logger.info(f"Model: {MODEL_NAME}")
-    logger.info(f"K_DIM: {K_DIM}, SEQ_LEN: {SEQ_LEN}")
+logger.info("=" * 60)
+logger.info("RunPod2 vLLM Handler Starting")
+logger.info("=" * 60)
+logger.info(f"vLLM URL: {VLLM_BASE_URL}")
+logger.info(f"Model: {MODEL_NAME}")
+logger.info(f"K_DIM: {K_DIM}, SEQ_LEN: {SEQ_LEN}")
+logger.info("Starting RunPod serverless worker (vLLM may still be loading)...")
 
-    # Start RunPod serverless worker immediately
-    # vLLM health check is done inside pooled_handler_v2 while polling
-    # orchestrator for shutdown commands, so the worker can be stopped
-    # even during model loading
-    logger.info("Starting RunPod serverless worker (vLLM may still be loading)...")
-    runpod.serverless.start({"handler": handler})
+runpod.serverless.start({"handler": handler})
